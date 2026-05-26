@@ -30,6 +30,7 @@ const db = getDatabase(app);
 
 let currentUser = null;
 let currentGroup = null;
+const DEFAULT_GROUP = 'SALVAMONEY';
 let viewYear = new Date().getFullYear();
 let viewMonth = new Date().getMonth();
 
@@ -81,6 +82,17 @@ function monthKey(year = viewYear, month = viewMonth) {
   return `${year}_${month}`;
 }
 
+function splitInstallments(totalValue, totalInstallments) {
+  const amountInCents = Math.round(Number(totalValue || 0) * 100);
+  const base = Math.floor(amountInCents / totalInstallments);
+  const remainder = amountInCents % totalInstallments;
+
+  return Array.from({ length: totalInstallments }, (_, index) => {
+    const cents = base + (index < remainder ? 1 : 0);
+    return cents / 100;
+  });
+}
+
 function expPath() {
   return `grupos/${currentGroup}/usuarios/${currentUser}/gastos/${monthKey()}`;
 }
@@ -113,6 +125,36 @@ function validFirebaseKey(value) {
 
 function validGroupCode(value) {
   return /^[A-Z0-9_-]{4,40}$/.test(value);
+}
+
+function resolveGroup() {
+  const fromQuery = new URLSearchParams(window.location.search).get('g');
+  if (fromQuery && validGroupCode(fromQuery.trim().toUpperCase())) {
+    return fromQuery.trim().toUpperCase();
+  }
+
+  const fromStorage = localStorage.getItem('fin_group');
+  if (fromStorage && validGroupCode(fromStorage.trim().toUpperCase())) {
+    return fromStorage.trim().toUpperCase();
+  }
+
+  return DEFAULT_GROUP;
+}
+
+async function ensureGroupExists(group) {
+  if (!group || !validGroupCode(group)) {
+    throw new Error('Grupo inválido para inicialização.');
+  }
+
+  const infoRef = ref(db, `grupos/${group}/info`);
+  const snap = await get(infoRef);
+
+  if (!snap.exists()) {
+    await set(infoRef, {
+      criador: 'site',
+      criado: Date.now()
+    });
+  }
 }
 
 function safeText(value) {
@@ -225,38 +267,16 @@ async function withError(action, fallback = 'Não foi possível concluir a opera
 // LOGIN
 window.entrar = async function() {
   const nome = $('l-nome').value.trim();
-  const grupo = $('l-grupo').value.trim().toUpperCase();
-  const acao = document.querySelector('input[name="acao"]:checked').value;
+  const grupo = resolveGroup();
 
   if (!nome) return showMsg('login-msg', 'Informe seu nome.', 'err');
   if (!validFirebaseKey(nome)) {
     return showMsg('login-msg', 'Nome inválido. Evite caracteres como / . # $ [ ].', 'err');
   }
-  if (!grupo) return showMsg('login-msg', 'Informe o código do grupo.', 'err');
-  if (!validGroupCode(grupo)) {
-    return showMsg('login-msg', 'Use 4 a 40 caracteres: letras, números, _ ou -.', 'err');
-  }
+  if (!grupo || !validGroupCode(grupo)) return showMsg('login-msg', 'Não foi possível resolver o grupo interno.', 'err');
 
   await withError(async () => {
-    const groupRef = ref(db, `grupos/${grupo}`);
-    const snap = await get(groupRef);
-
-    if (acao === 'criar') {
-      if (snap.exists()) {
-        showMsg('login-msg', 'Esse código já existe. Tente outro.', 'err');
-        return;
-      }
-
-      await set(ref(db, `grupos/${grupo}/info`), {
-        criador: nome,
-        criado: Date.now()
-      });
-
-      showMsg('login-msg', 'Grupo criado com sucesso!', 'ok');
-    } else if (!snap.exists()) {
-      showMsg('login-msg', 'Grupo não encontrado. Verifique o código.', 'err');
-      return;
-    }
+    await ensureGroupExists(grupo);
 
     currentUser = nome;
     currentGroup = grupo;
@@ -267,7 +287,6 @@ window.entrar = async function() {
     $('screen-login').style.display = 'none';
     $('screen-app').style.display = 'block';
     $('header-user').textContent = nome;
-    $('header-group').textContent = grupo;
     $('exp-date').value = todayValue();
 
     startListeners();
@@ -400,7 +419,7 @@ window.addExpense = async function() {
 
     if (parcelas > 1) {
       const baseDate = new Date(date + 'T12:00:00');
-      const parcelaValue = Math.round((value / parcelas) * 100) / 100;
+      const parcelValues = splitInstallments(value, parcelas);
       const parcelaId = Date.now().toString();
 
       for (let i = 0; i < parcelas; i++) {
@@ -417,7 +436,7 @@ window.addExpense = async function() {
 
         await push(ref(db, `grupos/${currentGroup}/usuarios/${currentUser}/gastos/${year}_${month}`), {
           desc: `${desc} (${i + 1}/${parcelas}x)`,
-          value: parcelaValue,
+          value: parcelValues[i],
           cat,
           date: pDate,
           user: currentUser,
@@ -429,7 +448,7 @@ window.addExpense = async function() {
         });
       }
 
-      showToast(`Parcelado em ${parcelas}x de ${fmt(parcelaValue)}.`);
+      showToast(`Parcelado em ${parcelas}x de ${fmt(value / parcelas)}.`);
     } else {
       await push(ref(db, expPath()), {
         desc,
@@ -452,13 +471,73 @@ window.addExpense = async function() {
   }, 'Erro ao salvar gasto.');
 };
 
-window.deleteExpense = async function(id) {
+window.deleteExpense = async function(id, expense = null) {
+  if (expense && expense.parcelaId) {
+    const action = prompt(
+      'Este gasto é parcelado.\nDigite:\n1 = excluir só esta parcela\n2 = excluir o parcelamento inteiro',
+      '1'
+    );
+
+    if (action === null) return;
+    if (action.trim() === '2') {
+      await deleteInstallmentGroup(expense.parcelaId);
+      return;
+    }
+    if (action.trim() !== '1') {
+      showToast('Opção inválida. Operação cancelada.', 'err');
+      return;
+    }
+  }
+
   if (!confirm('Tem certeza que quer excluir este gasto?')) return;
 
   await withError(async () => {
     await remove(ref(db, `${expPath()}/${id}`));
     showToast('Gasto removido.');
   }, 'Erro ao excluir gasto.');
+};
+
+window.deleteInstallmentGroup = async function(parcelaId) {
+  if (!parcelaId) return showToast('Parcelamento inválido.', 'err');
+  if (!confirm('Excluir todas as parcelas desta compra?')) return;
+
+  await withError(async () => {
+    const gastosBase = `grupos/${currentGroup}/usuarios/${currentUser}/gastos`;
+    const monthsSnap = await get(ref(db, gastosBase));
+    const monthsData = monthsSnap.val() || {};
+    const removes = [];
+    let removedCount = 0;
+
+    Object.entries(monthsData).forEach(([month, items]) => {
+      Object.entries(items || {}).forEach(([id, item]) => {
+        if (safeText(item.parcelaId) === safeText(parcelaId)) {
+          removes.push(remove(ref(db, `${gastosBase}/${month}/${id}`)));
+          removedCount++;
+        }
+      });
+    });
+
+    if (!removedCount) {
+      showToast('Nenhuma parcela encontrada para excluir.', 'err');
+      return;
+    }
+
+    await Promise.all(removes);
+    await render();
+    showToast(`${removedCount} parcela(s) removida(s).`);
+  }, 'Erro ao excluir parcelamento.');
+};
+
+window.duplicateExpense = function(expense) {
+  if (!expense) return;
+  $('exp-desc').value = safeText(expense.desc || '').replace(/\s\(\d+\/\d+x\)\s*$/, '');
+  $('exp-value').value = Number(expense.value || 0);
+  $('exp-cat').value = CAT_BY_NAME[expense.cat] ? expense.cat : 'Outros';
+  $('exp-date').value = safeText(expense.date || '');
+  $('exp-parcelas').value = '1';
+  $('parcela-preview').textContent = '';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  showToast('Gasto preenchido para duplicar.');
 };
 
 window.abrirEditar = function(id, expense) {
@@ -634,14 +713,30 @@ window.deleteFixo = async function(id) {
 window.aplicarFixos = async function() {
   await withError(async () => {
     const snap = await get(ref(db, fixosPath()));
-    const fixedExpenses = Object.values(snap.val() || {});
+    const fixedExpenses = Object.entries(snap.val() || {}).map(([id, fixed]) => ({ id, ...fixed }));
 
     if (!fixedExpenses.length) {
       showToast('Nenhum gasto fixo cadastrado.', 'err');
       return;
     }
 
+    const currentMonthKey = monthKey();
+    const monthSnap = await get(ref(db, expPath()));
+    const monthExpenses = Object.values(monthSnap.val() || {});
+    const appliedKeys = new Set(
+      monthExpenses
+        .filter(item => item.fixo === true && item.refFixo && item.fixoMesKey === currentMonthKey)
+        .map(item => `${item.refFixo}:${item.fixoMesKey}`)
+    );
+
+    let appliedCount = 0;
+
     for (const fixed of fixedExpenses) {
+      const refFixo = safeText(fixed.id);
+      const dedupKey = `${refFixo}:${currentMonthKey}`;
+
+      if (appliedKeys.has(dedupKey)) continue;
+
       const dia = Math.min(Math.max(Number(fixed.dia || 1), 1), 31);
       const date =
         `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
@@ -653,12 +748,22 @@ window.aplicarFixos = async function() {
         date,
         user: currentUser,
         fixo: true,
+        refFixo,
+        fixoMesKey: currentMonthKey,
         origem: 'site',
         createdAt: new Date().toISOString()
       });
+
+      appliedKeys.add(dedupKey);
+      appliedCount++;
     }
 
-    showToast(`${fixedExpenses.length} gasto(s) fixo(s) aplicado(s).`);
+    if (!appliedCount) {
+      showToast('Os gastos fixos deste mês já foram aplicados.', 'err');
+      return;
+    }
+
+    showToast(`${appliedCount} gasto(s) fixo(s) aplicado(s).`);
   }, 'Erro ao aplicar gastos fixos.');
 };
 
@@ -799,12 +904,20 @@ function renderExpenseList() {
   const list = $('expense-list');
   const search = $('expense-search').value.trim().toLowerCase();
   const filter = $('expense-filter').value;
+  const order = $('expense-order').value;
 
   const filtered = expenseCache.filter(([, item]) => {
     const text = `${item.desc || ''} ${item.cat || ''}`.toLowerCase();
     const matchesText = !search || text.includes(search);
     const matchesCategory = !filter || item.cat === filter;
     return matchesText && matchesCategory;
+  });
+
+  filtered.sort((a, b) => {
+    if (order === 'value-desc') return Number(b[1].value || 0) - Number(a[1].value || 0);
+    if (order === 'value-asc') return Number(a[1].value || 0) - Number(b[1].value || 0);
+    if (order === 'date-asc') return safeText(a[1].date).localeCompare(safeText(b[1].date));
+    return safeText(b[1].date).localeCompare(safeText(a[1].date));
   });
 
   if (!filtered.length) {
@@ -859,9 +972,16 @@ function renderExpenseList() {
 
       const actions = make('div', 'expense-actions');
       actions.append(
+        makeButton('⧉', 'btn-icon', 'Duplicar gasto', () => duplicateExpense(item)),
         makeButton('✎', 'btn-icon btn-icon-edit', 'Editar gasto', () => abrirEditar(id, item)),
-        makeButton('⌫', 'btn-icon btn-icon-danger', 'Excluir gasto', () => deleteExpense(id))
+        makeButton('⌫', 'btn-icon btn-icon-danger', 'Excluir gasto', () => deleteExpense(id, item))
       );
+
+      if (item.parcelaId) {
+        actions.append(
+          makeButton('⛓', 'btn-icon btn-icon-danger', 'Excluir parcelamento', () => deleteInstallmentGroup(item.parcelaId))
+        );
+      }
 
       row.append(dot, info, amount, actions);
       group.appendChild(row);
@@ -1237,14 +1357,8 @@ fillCategories();
 updateMonthLabels();
 
 const savedUser = localStorage.getItem('fin_user');
-const savedGroup = localStorage.getItem('fin_group');
 
 if (savedUser) $('l-nome').value = savedUser;
-if (savedGroup) $('l-grupo').value = savedGroup;
-
-$('l-grupo').addEventListener('keydown', event => {
-  if (event.key === 'Enter') entrar();
-});
 </script>
 
 <style>
@@ -1394,7 +1508,9 @@ header {
   min-height: 64px;
   padding: 10px 18px;
   border-bottom: 1px solid var(--line);
-  background: rgba(17,19,21,.92);
+  background:
+    linear-gradient(90deg, rgba(18,185,129,.12), transparent 28%),
+    rgba(17,19,21,.92);
   backdrop-filter: blur(12px);
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -1460,6 +1576,7 @@ header {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .16);
 }
 
 .summary-card {
@@ -1658,6 +1775,12 @@ select:focus {
 .btn-primary {
   background: var(--accent);
   color: #04241a;
+  transition: transform .16s ease, filter .16s ease;
+}
+
+.btn-primary:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.05);
 }
 
 .btn-secondary,
@@ -1686,7 +1809,7 @@ select:focus {
 
 .list-tools {
   display: grid;
-  grid-template-columns: 1fr 180px;
+  grid-template-columns: 1fr 180px 160px;
   gap: 8px;
   margin-bottom: 12px;
 }
@@ -1733,6 +1856,8 @@ select:focus {
 
 .expense-item:hover {
   border-color: var(--line-2);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 18px rgba(0,0,0,.18);
 }
 
 .expense-cat-dot,
@@ -2127,30 +2252,14 @@ select:focus {
 <div id="screen-login">
   <div class="login-box">
     <div class="login-logo">💰 Salva<span class="accent">Money</span></div>
-    <div class="login-sub">Controle seus gastos e acompanhe o que o bot registrar</div>
+    <div class="login-sub">Seu painel pessoal para controlar gastos e acompanhar o que o bot registrar</div>
 
     <div class="form-group">
       <label>Seu nome</label>
       <input type="text" id="l-nome" maxlength="60" placeholder="Ex: João, Ana..." autocomplete="name">
     </div>
 
-    <div class="form-group">
-      <label>Código do grupo</label>
-      <input type="text" id="l-grupo" maxlength="40" placeholder="Ex: CASA2024" style="text-transform:uppercase">
-    </div>
-
-    <div class="radio-group">
-      <label class="radio-opt">
-        <input type="radio" name="acao" value="entrar" checked>
-        Entrar no grupo
-      </label>
-      <label class="radio-opt">
-        <input type="radio" name="acao" value="criar">
-        Criar grupo
-      </label>
-    </div>
-
-    <button class="btn btn-primary btn-full" onclick="entrar()">Entrar</button>
+    <button class="btn btn-primary btn-full" onclick="entrar()">Continuar</button>
     <div id="login-msg" class="login-msg"></div>
   </div>
 </div>
@@ -2167,7 +2276,6 @@ select:focus {
     </div>
 
     <div class="header-right">
-      <span class="badge-group">Grupo: <span id="header-group"></span></span>
       <span class="badge-user">👤 <span id="header-user"></span></span>
       <button class="btn btn-secondary btn-sm" onclick="sair()">Sair</button>
     </div>
@@ -2293,6 +2401,12 @@ select:focus {
           <div class="list-tools">
             <input id="expense-search" placeholder="Buscar por descrição ou categoria" oninput="renderExpenseFilter()">
             <select id="expense-filter" onchange="renderExpenseFilter()"></select>
+            <select id="expense-order" onchange="renderExpenseFilter()">
+              <option value="date-desc">Mais recentes</option>
+              <option value="date-asc">Mais antigos</option>
+              <option value="value-desc">Maior valor</option>
+              <option value="value-asc">Menor valor</option>
+            </select>
           </div>
 
           <div class="expense-list" id="expense-list"></div>
