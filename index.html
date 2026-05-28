@@ -128,25 +128,15 @@ function validGroupCode(value) {
 }
 
 function resolveGroup() {
-  const fromQuery = new URLSearchParams(window.location.search).get('g');
-  if (fromQuery && validGroupCode(fromQuery.trim().toUpperCase())) {
-    return fromQuery.trim().toUpperCase();
-  }
-
-  const fromStorage = localStorage.getItem('fin_group');
-  if (fromStorage && validGroupCode(fromStorage.trim().toUpperCase())) {
-    return fromStorage.trim().toUpperCase();
-  }
-
   return DEFAULT_GROUP;
 }
 
 function normalizeTag(tag) {
-  return String(tag || '')
-    .trim()
-    .replace(/^@+/, '')
-    .replace(/\s+/g, '')
-    .toLowerCase();
+  return String(tag || '').replace(/\s+/g, '');
+}
+
+function validAccessTag(tag) {
+  return /^\d{6}$/.test(tag);
 }
 
 async function userTagExists(group, tag) {
@@ -269,8 +259,8 @@ window.entrar = async function() {
   const grupo = resolveGroup();
 
   if (!nome) return showMsg('login-msg', 'Informe seu nome.', 'err');
-  if (!tag) return showMsg('login-msg', 'Informe sua tag do WhatsApp.', 'err');
-  if (!validFirebaseKey(tag)) return showMsg('login-msg', 'Crie sua conta pelo WhatsApp.', 'err');
+  if (!tag) return showMsg('login-msg', 'Informe sua tag de acesso.', 'err');
+  if (!validAccessTag(tag)) return showMsg('login-msg', 'A tag deve ter 6 dígitos.', 'err');
   if (!grupo || !validGroupCode(grupo)) return showMsg('login-msg', 'Não foi possível entrar agora. Tente novamente.', 'err');
 
   try {
@@ -2270,8 +2260,8 @@ select:focus {
     </div>
 
     <div class="form-group">
-      <label>Sua tag do WhatsApp</label>
-      <input type="text" id="l-tag" maxlength="60" placeholder="Ex: @carlos ou carlos" autocomplete="username">
+      <label>Tag de acesso</label>
+      <input type="text" id="l-tag" maxlength="60" placeholder="Ex: 482913" autocomplete="username">
     </div>
 
     <button class="btn btn-primary btn-full" onclick="entrar()">Entrar</button>
