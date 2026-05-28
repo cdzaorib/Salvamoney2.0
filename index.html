@@ -127,6 +127,64 @@ function validGroupCode(value) {
   return /^[A-Z0-9_-]{4,40}$/.test(value);
 }
 
+function normalizeTag(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/\s+/g, '')
+    .toLowerCase();
+}
+
+function validUserTag(value) {
+  return /^[a-z0-9_-]{2,40}$/.test(value);
+}
+
+function tagCandidates(tag) {
+  const cleanTag = normalizeTag(tag);
+  return [...new Set([cleanTag, `@${cleanTag}`].filter(Boolean))];
+}
+
+async function findUserKeyByTag(group, tag) {
+  const cleanTag = normalizeTag(tag);
+
+  if (!group || !validGroupCode(group) || !validUserTag(cleanTag)) {
+    return null;
+  }
+
+  for (const candidate of tagCandidates(cleanTag)) {
+    const snap = await get(ref(db, `grupos/${group}/usuarios/${candidate}`));
+    if (snap.exists()) return candidate;
+  }
+
+  try {
+    const usersSnap = await get(ref(db, `grupos/${group}/usuarios`));
+    const users = usersSnap.val() || {};
+
+    for (const [key, data] of Object.entries(users)) {
+      const possibleTags = [
+        key,
+        data?.tag,
+        data?.userTag,
+        data?.whatsappTag,
+        data?.handle,
+        data?.id
+      ];
+
+      if (possibleTags.some(value => normalizeTag(value) === cleanTag)) {
+        return key;
+      }
+    }
+  } catch (error) {
+    console.warn('Não foi possível listar usuários para validar tag.', error);
+  }
+
+  return null;
+}
+
+function lastDayOfMonth(year, month) {
+  return new Date(year, month + 1, 0).getDate();
+}
+
 function resolveGroup() {
   const fromQuery = new URLSearchParams(window.location.search).get('g');
   if (fromQuery && validGroupCode(fromQuery.trim().toUpperCase())) {
@@ -139,22 +197,6 @@ function resolveGroup() {
   }
 
   return DEFAULT_GROUP;
-}
-
-async function ensureGroupExists(group) {
-  if (!group || !validGroupCode(group)) {
-    throw new Error('Grupo inválido para inicialização.');
-  }
-
-  const infoRef = ref(db, `grupos/${group}/info`);
-  const snap = await get(infoRef);
-
-  if (!snap.exists()) {
-    await set(infoRef, {
-      criador: 'site',
-      criado: Date.now()
-    });
-  }
 }
 
 function safeText(value) {
@@ -267,35 +309,52 @@ async function withError(action, fallback = 'Não foi possível concluir a opera
 // LOGIN
 window.entrar = async function() {
   const nome = $('l-nome').value.trim();
+  const tag = normalizeTag($('l-tag').value);
   const grupo = resolveGroup();
 
   if (!nome) return showMsg('login-msg', 'Informe seu nome.', 'err');
+  if (!tag) return showMsg('login-msg', 'Informe sua tag do WhatsApp. Se ainda não tiver, crie sua conta pelo WhatsApp.', 'err');
   if (!validFirebaseKey(nome)) {
     return showMsg('login-msg', 'Nome inválido. Evite caracteres como / . # $ [ ].', 'err');
   }
-  if (!grupo || !validGroupCode(grupo)) return showMsg('login-msg', 'Não foi possível resolver o grupo interno.', 'err');
+  if (!validUserTag(tag) || !validFirebaseKey(tag)) {
+    return showMsg('login-msg', 'Crie sua conta pelo WhatsApp.', 'err');
+  }
+  if (!grupo || !validGroupCode(grupo)) {
+    return showMsg('login-msg', 'Não foi possível entrar agora. Tente novamente.', 'err');
+  }
 
-  await withError(async () => {
-    await ensureGroupExists(grupo);
+  try {
+    const userKey = await findUserKeyByTag(grupo, tag);
 
-    currentUser = nome;
+    if (!userKey) {
+      showMsg('login-msg', 'Crie sua conta pelo WhatsApp.', 'err');
+      return;
+    }
+
+    currentUser = userKey;
     currentGroup = grupo;
 
     localStorage.setItem('fin_user', nome);
+    localStorage.setItem('fin_user_tag', tag);
     localStorage.setItem('fin_group', grupo);
 
     $('screen-login').style.display = 'none';
     $('screen-app').style.display = 'block';
-    $('header-user').textContent = nome;
+    $('header-user').textContent = `${nome} · @${tag}`;
     $('exp-date').value = todayValue();
 
     startListeners();
     await render();
-  }, 'Falha ao entrar no grupo.');
+  } catch (error) {
+    console.error(error);
+    showMsg('login-msg', 'Não foi possível entrar agora. Tente novamente.', 'err');
+  }
 };
 
 window.sair = function() {
   localStorage.removeItem('fin_user');
+  localStorage.removeItem('fin_user_tag');
   localStorage.removeItem('fin_group');
 
   currentUser = null;
@@ -391,7 +450,11 @@ window.calcParcela = function() {
   const parcelas = parseInt($('exp-parcelas').value, 10) || 1;
 
   if (value > 0 && parcelas > 1) {
-    $('parcela-preview').textContent = `${parcelas}x de ${fmt(value / parcelas)}`;
+    const values = splitInstallments(value, parcelas);
+    const first = values[0] || 0;
+    const last = values[values.length - 1] || 0;
+    const suffix = first === last ? '' : ` · ajuste final ${fmt(last)}`;
+    $('parcela-preview').textContent = `${parcelas}x a partir de ${fmt(first)}${suffix}`;
     return;
   }
 
@@ -448,7 +511,7 @@ window.addExpense = async function() {
         });
       }
 
-      showToast(`Parcelado em ${parcelas}x de ${fmt(value / parcelas)}.`);
+      showToast(`Parcelado em ${parcelas}x. Total conferido: ${fmt(value)}.`);
     } else {
       await push(ref(db, expPath()), {
         desc,
@@ -737,7 +800,8 @@ window.aplicarFixos = async function() {
 
       if (appliedKeys.has(dedupKey)) continue;
 
-      const dia = Math.min(Math.max(Number(fixed.dia || 1), 1), 31);
+      const maxDay = lastDayOfMonth(viewYear, viewMonth);
+      const dia = Math.min(Math.max(Number(fixed.dia || 1), 1), maxDay);
       const date =
         `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
 
@@ -1357,8 +1421,19 @@ fillCategories();
 updateMonthLabels();
 
 const savedUser = localStorage.getItem('fin_user');
+const savedUserTag = localStorage.getItem('fin_user_tag');
 
 if (savedUser) $('l-nome').value = savedUser;
+if (savedUserTag) $('l-tag').value = savedUserTag;
+
+['l-nome', 'l-tag'].forEach(id => {
+  const input = $(id);
+  if (!input) return;
+
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Enter') entrar();
+  });
+});
 </script>
 
 <style>
@@ -1485,6 +1560,12 @@ button {
   text-align: center;
   font-size: .82rem;
   border-radius: var(--radius);
+}
+
+.login-hint {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: .72rem;
 }
 
 .msg-err {
@@ -1720,6 +1801,12 @@ label {
   font-size: .72rem;
   font-weight: 700;
   margin-bottom: 4px;
+}
+
+.field-hint {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: .72rem;
 }
 
 input,
@@ -2252,14 +2339,20 @@ select:focus {
 <div id="screen-login">
   <div class="login-box">
     <div class="login-logo">💰 Salva<span class="accent">Money</span></div>
-    <div class="login-sub">Seu painel pessoal para controlar gastos e acompanhar o que o bot registrar</div>
+    <div class="login-sub">Entre com seu nome e a mesma tag criada no bot do WhatsApp</div>
 
     <div class="form-group">
       <label>Seu nome</label>
-      <input type="text" id="l-nome" maxlength="60" placeholder="Ex: João, Ana..." autocomplete="name">
+      <input type="text" id="l-nome" maxlength="60" placeholder="Ex: Carlos" autocomplete="name">
     </div>
 
-    <button class="btn btn-primary btn-full" onclick="entrar()">Continuar</button>
+    <div class="form-group">
+      <label>Sua tag do WhatsApp</label>
+      <input type="text" id="l-tag" maxlength="41" placeholder="Ex: @carlos ou carlos" autocomplete="username" autocapitalize="none" spellcheck="false">
+      <div class="field-hint">Se ainda não tiver uma tag, crie sua conta pelo WhatsApp antes de entrar.</div>
+    </div>
+
+    <button class="btn btn-primary btn-full" onclick="entrar()">Entrar</button>
     <div id="login-msg" class="login-msg"></div>
   </div>
 </div>
