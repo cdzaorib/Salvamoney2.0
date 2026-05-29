@@ -117,6 +117,14 @@ function metaPath() {
   return `grupos/${currentGroup}/usuarios/${currentUser}/meta`;
 }
 
+function savingsGoalPath() {
+  return `grupos/${currentGroup}/usuarios/${currentUser}/metasEconomia/${monthKey()}`;
+}
+
+function perfilFinanceiroPath() {
+  return `grupos/${currentGroup}/usuarios/${currentUser}/perfilFinanceiro`;
+}
+
 function cobrancasRecebidasPath() {
   return `grupos/${currentGroup}/usuarios/${currentUser}/cobrancasRecebidas`;
 }
@@ -801,9 +809,26 @@ window.salvarMeta = async function() {
   }
 
   await withError(async () => {
-    await set(ref(db, metaPath()), value);
+    const goalRef = ref(db, savingsGoalPath());
+    const existingSnap = await get(goalRef);
+    const existing = existingSnap.val() || {};
+    const timestamp = new Date().toISOString();
+
+    await Promise.all([
+      set(ref(db, metaPath()), value),
+      set(goalRef, {
+        ...existing,
+        valorMeta: value,
+        descricao: existing.descricao || 'Meta de economia do mês',
+        ativo: true,
+        createdAt: existing.createdAt || timestamp,
+        updatedAt: timestamp
+      })
+    ]);
+
     await updateSummary();
-    showToast('Meta salva.');
+    await renderSavingsGoal();
+    showToast('Meta de economia salva.');
   }, 'Erro ao salvar meta.');
 };
 
@@ -1454,6 +1479,72 @@ async function renderCobrancas() {
   renderChargeList('charges-sent-list', sent, 'sent');
 }
 
+// META INTELIGENTE RENDER
+function goalStatusText(target, income, spent) {
+  if (!target) return 'Nenhuma meta ativa para este mês.';
+
+  if (!income) {
+    return 'Informe sua renda pelo WhatsApp para calcular a economia projetada com mais precisão.';
+  }
+
+  const projected = income - spent;
+  const diff = projected - target;
+
+  if (diff >= 0) {
+    return `Você está acima da meta por enquanto. Sobra prevista: ${fmt(diff)}.`;
+  }
+
+  return `Faltam ${fmt(Math.abs(diff))} para bater a meta, considerando sua renda e seus gastos atuais.`;
+}
+
+async function renderSavingsGoal() {
+  if (!$('smart-meta-target')) return;
+
+  const [goalSnap, legacyMetaSnap, expenseSnap, profileSnap] = await Promise.all([
+    get(ref(db, savingsGoalPath())),
+    get(ref(db, metaPath())),
+    get(ref(db, expPath())),
+    get(ref(db, perfilFinanceiroPath()))
+  ]);
+
+  const goal = goalSnap.val() || {};
+  const legacyMeta = Number(legacyMetaSnap.val() || 0);
+  const hasSmartGoal = goal.ativo !== false && Number(goal.valorMeta || 0) > 0;
+  const target = hasSmartGoal ? Number(goal.valorMeta || 0) : legacyMeta;
+  const profile = profileSnap.val() || {};
+  const income = Number(profile.rendaMensal || 0);
+  const expenses = Object.values(expenseSnap.val() || {});
+  const spent = expenses.reduce((sum, item) => sum + Number(item.value || 0), 0);
+  const projectedSavings = income ? income - spent : 0;
+  const progress = target && income
+    ? Math.max(0, Math.min(100, Math.round((projectedSavings / target) * 100)))
+    : 0;
+
+  $('smart-meta-target').textContent = target ? fmt(target) : 'Sem meta';
+  $('smart-meta-income').textContent = income ? fmt(income) : 'Não informada';
+  $('smart-meta-spent').textContent = fmt(spent);
+  $('smart-meta-projected').textContent = income ? fmt(projectedSavings) : 'Sem renda';
+  $('smart-meta-status').textContent = goalStatusText(target, income, spent);
+  $('meta-status').textContent = goalStatusText(target, income, spent);
+  $('meta-value').value = target || '';
+  $('meta-section').style.display = target ? 'block' : 'none';
+  $('meta-progress-bar').style.width = `${progress}%`;
+  $('meta-progress-label').textContent = target && income
+    ? `${progress}% da meta projetada`
+    : 'Configure renda e meta para acompanhar o progresso';
+
+  $('smart-meta-source').textContent = hasSmartGoal
+    ? 'Meta criada pelo bot ou pelo site'
+    : legacyMeta
+      ? 'Meta antiga do dashboard convertida visualmente'
+      : 'Crie uma meta pelo bot ou pelo site';
+
+  $('smart-meta-tip').textContent = income
+    ? 'Dica: acompanhe sua meta pelo WhatsApp com "minha meta".'
+    : 'Dica: envie "recebo 3000 todo dia 5" no WhatsApp para ativar a projeção automática.';
+}
+
+
 // RESUMO
 async function updateSummary() {
   const [expenseSnap, budgetSnap, billSnap, metaSnap] = await Promise.all([
@@ -1538,6 +1629,7 @@ async function render() {
   await renderFixos();
   await renderCobrancas();
   await updateSummary();
+  await renderSavingsGoal();
   await renderCompChart();
 }
 
@@ -2417,6 +2509,48 @@ select:focus {
 }
 
 
+.meta-progress-label {
+  color: var(--muted);
+  font-size: .72rem;
+  margin-bottom: 8px;
+}
+
+.goal-tip {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(18,185,129,.28);
+  border-radius: var(--radius);
+  color: #9ff0d5;
+  background: rgba(18,185,129,.10);
+  font-size: .78rem;
+  font-weight: 700;
+}
+
+.command-list {
+  display: grid;
+  gap: 10px;
+}
+
+.command-list div {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+
+.command-list strong {
+  display: block;
+  color: var(--text);
+  margin-bottom: 3px;
+}
+
+.command-list span {
+  display: block;
+  color: var(--muted);
+  font-size: .72rem;
+}
+
+
 .limits-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2901,24 +3035,68 @@ select:focus {
     </section>
 
     <section id="tab-metas" class="tab-content">
-      <div class="panel" style="max-width:620px">
-        <div class="panel-title">Meta de economia</div>
+      <div class="charge-summary-grid">
+        <div class="summary-card">
+          <div class="card-label">Meta do mês</div>
+          <div class="card-value text-accent" id="smart-meta-target">Sem meta</div>
+          <div class="card-sub" id="smart-meta-source">Crie uma meta pelo bot ou pelo site</div>
+        </div>
 
-        <div class="form-row">
-          <div class="form-group">
-            <label>Quanto quer economizar este mês?</label>
-            <input type="number" id="meta-value" min="0" step="0.01" placeholder="Ex: 500">
+        <div class="summary-card">
+          <div class="card-label">Renda mensal</div>
+          <div class="card-value text-info" id="smart-meta-income">Não informada</div>
+          <div class="card-sub">Configure pelo WhatsApp</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="card-label">Gasto até agora</div>
+          <div class="card-value text-danger" id="smart-meta-spent">R$ 0,00</div>
+          <div class="card-sub">Total registrado no mês</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="card-label">Economia projetada</div>
+          <div class="card-value text-warning" id="smart-meta-projected">Sem renda</div>
+          <div class="card-sub">Renda menos gastos do mês</div>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="panel">
+          <div class="panel-title">Meta inteligente de economia</div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label>Quanto quer economizar este mês?</label>
+              <input type="number" id="meta-value" min="0" step="0.01" placeholder="Ex: 500">
+              <div class="field-hint">Essa meta fica sincronizada com o bot em metasEconomia/{mês}.</div>
+            </div>
+
+            <div class="form-group" style="align-self:end">
+              <button class="btn btn-primary btn-full" onclick="salvarMeta()">Salvar meta</button>
+            </div>
           </div>
 
-          <div class="form-group" style="align-self:end">
-            <button class="btn btn-primary btn-full" onclick="salvarMeta()">Salvar meta</button>
+          <div id="meta-section" style="display:none">
+            <div class="meta-box">
+              <div class="meta-bar-wrap"><div id="meta-progress-bar"></div></div>
+              <div class="meta-progress-label" id="meta-progress-label">Configure renda e meta para acompanhar o progresso</div>
+              <div id="meta-status"></div>
+            </div>
+          </div>
+
+          <div class="goal-tip" id="smart-meta-tip">
+            Dica: acompanhe sua meta pelo WhatsApp com "minha meta".
           </div>
         </div>
 
-        <div id="meta-section" style="display:none">
-          <div class="meta-box">
-            <div class="meta-bar-wrap"><div id="meta-progress-bar"></div></div>
-            <div id="meta-status"></div>
+        <div class="panel">
+          <div class="panel-title">Comandos pelo WhatsApp</div>
+          <div class="command-list">
+            <div><strong>criar meta de economizar 500 esse mês</strong><span>Cria uma meta inteligente.</span></div>
+            <div><strong>minha meta</strong><span>Mostra progresso, renda, gasto e economia projetada.</span></div>
+            <div><strong>cancelar meta</strong><span>Desativa a meta do mês sem apagar histórico.</span></div>
+            <div><strong>recebo 3000 todo dia 5</strong><span>Configura renda para melhorar a projeção.</span></div>
           </div>
         </div>
       </div>
