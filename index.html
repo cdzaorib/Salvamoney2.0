@@ -127,58 +127,21 @@ function validGroupCode(value) {
   return /^[A-Z0-9_-]{4,40}$/.test(value);
 }
 
-function normalizeTag(value) {
-  return String(value || '')
-    .trim()
-    .replace(/^@+/, '')
-    .replace(/\s+/g, '')
-    .toLowerCase();
+function normalizeAccessTag(value) {
+  return String(value || '').replace(/\D/g, '');
 }
 
-function validUserTag(value) {
-  return /^[a-z0-9_-]{2,40}$/.test(value);
+function validAccessTag(value) {
+  return /^\d{6}$/.test(value);
 }
 
-function tagCandidates(tag) {
-  const cleanTag = normalizeTag(tag);
-  return [...new Set([cleanTag, `@${cleanTag}`].filter(Boolean))];
-}
-
-async function findUserKeyByTag(group, tag) {
-  const cleanTag = normalizeTag(tag);
-
-  if (!group || !validGroupCode(group) || !validUserTag(cleanTag)) {
-    return null;
+async function userTagExists(group, tag) {
+  if (!group || !validGroupCode(group) || !validAccessTag(tag)) {
+    return false;
   }
 
-  for (const candidate of tagCandidates(cleanTag)) {
-    const snap = await get(ref(db, `grupos/${group}/usuarios/${candidate}`));
-    if (snap.exists()) return candidate;
-  }
-
-  try {
-    const usersSnap = await get(ref(db, `grupos/${group}/usuarios`));
-    const users = usersSnap.val() || {};
-
-    for (const [key, data] of Object.entries(users)) {
-      const possibleTags = [
-        key,
-        data?.tag,
-        data?.userTag,
-        data?.whatsappTag,
-        data?.handle,
-        data?.id
-      ];
-
-      if (possibleTags.some(value => normalizeTag(value) === cleanTag)) {
-        return key;
-      }
-    }
-  } catch (error) {
-    console.warn('Não foi possível listar usuários para validar tag.', error);
-  }
-
-  return null;
+  const snap = await get(ref(db, `grupos/${group}/usuarios/${tag}`));
+  return snap.exists();
 }
 
 function lastDayOfMonth(year, month) {
@@ -186,16 +149,6 @@ function lastDayOfMonth(year, month) {
 }
 
 function resolveGroup() {
-  const fromQuery = new URLSearchParams(window.location.search).get('g');
-  if (fromQuery && validGroupCode(fromQuery.trim().toUpperCase())) {
-    return fromQuery.trim().toUpperCase();
-  }
-
-  const fromStorage = localStorage.getItem('fin_group');
-  if (fromStorage && validGroupCode(fromStorage.trim().toUpperCase())) {
-    return fromStorage.trim().toUpperCase();
-  }
-
   return DEFAULT_GROUP;
 }
 
@@ -309,30 +262,30 @@ async function withError(action, fallback = 'Não foi possível concluir a opera
 // LOGIN
 window.entrar = async function() {
   const nome = $('l-nome').value.trim();
-  const tag = normalizeTag($('l-tag').value);
+  const tag = normalizeAccessTag($('l-tag').value);
   const grupo = resolveGroup();
 
   if (!nome) return showMsg('login-msg', 'Informe seu nome.', 'err');
-  if (!tag) return showMsg('login-msg', 'Informe sua tag do WhatsApp. Se ainda não tiver, crie sua conta pelo WhatsApp.', 'err');
+  if (!tag) return showMsg('login-msg', 'Informe sua tag de acesso.', 'err');
   if (!validFirebaseKey(nome)) {
     return showMsg('login-msg', 'Nome inválido. Evite caracteres como / . # $ [ ].', 'err');
   }
-  if (!validUserTag(tag) || !validFirebaseKey(tag)) {
-    return showMsg('login-msg', 'Crie sua conta pelo WhatsApp.', 'err');
+  if (!validAccessTag(tag)) {
+    return showMsg('login-msg', 'A tag deve ter 6 dígitos.', 'err');
   }
   if (!grupo || !validGroupCode(grupo)) {
     return showMsg('login-msg', 'Não foi possível entrar agora. Tente novamente.', 'err');
   }
 
   try {
-    const userKey = await findUserKeyByTag(grupo, tag);
+    const exists = await userTagExists(grupo, tag);
 
-    if (!userKey) {
+    if (!exists) {
       showMsg('login-msg', 'Crie sua conta pelo WhatsApp.', 'err');
       return;
     }
 
-    currentUser = userKey;
+    currentUser = tag;
     currentGroup = grupo;
 
     localStorage.setItem('fin_user', nome);
@@ -341,7 +294,7 @@ window.entrar = async function() {
 
     $('screen-login').style.display = 'none';
     $('screen-app').style.display = 'block';
-    $('header-user').textContent = `${nome} · @${tag}`;
+    $('header-user').textContent = `${nome} · ${tag}`;
     $('exp-date').value = todayValue();
 
     startListeners();
@@ -2339,7 +2292,7 @@ select:focus {
 <div id="screen-login">
   <div class="login-box">
     <div class="login-logo">💰 Salva<span class="accent">Money</span></div>
-    <div class="login-sub">Entre com seu nome e a mesma tag criada no bot do WhatsApp</div>
+    <div class="login-sub">Entre com seu nome e a tag de 6 dígitos criada pelo bot no WhatsApp</div>
 
     <div class="form-group">
       <label>Seu nome</label>
@@ -2347,9 +2300,9 @@ select:focus {
     </div>
 
     <div class="form-group">
-      <label>Sua tag do WhatsApp</label>
-      <input type="text" id="l-tag" maxlength="41" placeholder="Ex: @carlos ou carlos" autocomplete="username" autocapitalize="none" spellcheck="false">
-      <div class="field-hint">Se ainda não tiver uma tag, crie sua conta pelo WhatsApp antes de entrar.</div>
+      <label>Tag de acesso</label>
+      <input type="text" id="l-tag" maxlength="6" inputmode="numeric" pattern="[0-9]*" placeholder="Ex: 482913" autocomplete="one-time-code" autocapitalize="none" spellcheck="false">
+      <div class="field-hint">Use a tag de 6 dígitos gerada pelo bot. Se ainda não tiver, crie sua conta pelo WhatsApp.</div>
     </div>
 
     <button class="btn btn-primary btn-full" onclick="entrar()">Entrar</button>
