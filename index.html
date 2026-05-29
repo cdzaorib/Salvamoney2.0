@@ -117,6 +117,14 @@ function metaPath() {
   return `grupos/${currentGroup}/usuarios/${currentUser}/meta`;
 }
 
+function cobrancasRecebidasPath() {
+  return `grupos/${currentGroup}/usuarios/${currentUser}/cobrancasRecebidas`;
+}
+
+function cobrancasEnviadasPath() {
+  return `grupos/${currentGroup}/usuarios/${currentUser}/cobrancasEnviadas`;
+}
+
 function validFirebaseKey(value) {
   return value &&
     value.length <= 60 &&
@@ -1283,6 +1291,169 @@ async function renderFixos() {
   });
 }
 
+
+// COBRANÇAS RENDER
+function chargeValue(charge) {
+  return Number(charge?.valorCobrado ?? charge?.value ?? 0);
+}
+
+function chargeDate(charge) {
+  return safeText(charge?.createdAt || charge?.updatedAt || charge?.respondedAt || charge?.paidAt || '');
+}
+
+function chargeStatus(charge) {
+  const status = safeText(charge?.status || 'pendente').toLowerCase();
+  return ['pendente', 'aceita', 'recusada', 'cancelada', 'paga'].includes(status) ? status : 'pendente';
+}
+
+function chargeStatusLabel(status) {
+  const labels = {
+    pendente: 'Pendente',
+    aceita: 'Aceita',
+    recusada: 'Recusada',
+    cancelada: 'Cancelada',
+    paga: 'Paga'
+  };
+
+  return labels[status] || 'Pendente';
+}
+
+function chargeStatusRank(status) {
+  const ranks = {
+    pendente: 0,
+    aceita: 1,
+    paga: 2,
+    recusada: 3,
+    cancelada: 4
+  };
+
+  return ranks[status] ?? 5;
+}
+
+function sortCharges(entries) {
+  return entries.sort((a, b) => {
+    const statusDiff = chargeStatusRank(chargeStatus(a[1])) - chargeStatusRank(chargeStatus(b[1]));
+    if (statusDiff) return statusDiff;
+    return chargeDate(b[1]).localeCompare(chargeDate(a[1]));
+  });
+}
+
+function formatChargeDate(value) {
+  if (!value) return 'Sem data';
+
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleDateString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric'
+    });
+  }
+
+  return safeText(value).slice(0, 10) || 'Sem data';
+}
+
+function updateChargeSummary(received, sent) {
+  const pendingToPay = received
+    .filter(([, charge]) => chargeStatus(charge) === 'pendente')
+    .reduce((sum, [, charge]) => sum + chargeValue(charge), 0);
+
+  const pendingToReceive = sent
+    .filter(([, charge]) => chargeStatus(charge) === 'pendente')
+    .reduce((sum, [, charge]) => sum + chargeValue(charge), 0);
+
+  const paidReceived = sent
+    .filter(([, charge]) => chargeStatus(charge) === 'paga')
+    .reduce((sum, [, charge]) => sum + chargeValue(charge), 0);
+
+  const pendingCount = received
+    .concat(sent)
+    .filter(([, charge]) => chargeStatus(charge) === 'pendente')
+    .length;
+
+  $('charge-receive-total').textContent = fmt(pendingToReceive);
+  $('charge-pay-total').textContent = fmt(pendingToPay);
+  $('charge-paid-total').textContent = fmt(paidReceived);
+  $('charge-pending-count').textContent = String(pendingCount);
+}
+
+function renderChargeList(containerId, entries, direction) {
+  const container = $(containerId);
+
+  if (!entries.length) {
+    emptyState(
+      container,
+      direction === 'received' ? '📥' : '📤',
+      direction === 'received' ? 'Nenhuma cobrança recebida.' : 'Nenhuma cobrança enviada.'
+    );
+    return;
+  }
+
+  clearNode(container);
+
+  sortCharges(entries).forEach(([, charge]) => {
+    const status = chargeStatus(charge);
+    const card = make('article', 'charge-card');
+
+    const top = make('div', 'charge-top');
+    const left = make('div', 'charge-info');
+    const title = make('div', 'charge-title', safeText(charge.descricao || 'Cobrança'));
+    const person = direction === 'received'
+      ? `De: ${safeText(charge.nomeOrigem || charge.tagOrigem || 'Pessoa')}`
+      : `Para: ${safeText(charge.nomeDestino || charge.tagDestino || 'Pessoa')}`;
+
+    const meta = make(
+      'div',
+      'charge-meta',
+      `${person} · ${formatChargeDate(charge.createdAt)}`
+    );
+
+    left.append(title, meta);
+
+    const statusPill = make('span', `status-pill status-${status}`, chargeStatusLabel(status));
+    top.append(left, statusPill);
+
+    const valueLine = make('div', 'charge-value-row');
+    valueLine.append(
+      make('strong', 'charge-value', fmt(chargeValue(charge))),
+      make('span', 'charge-percent', charge.percentual ? `${Number(charge.percentual)}% do gasto` : '')
+    );
+
+    const details = make('div', 'charge-details');
+
+    if (charge.respondedAt) {
+      details.appendChild(make('span', '', `Respondida em ${formatChargeDate(charge.respondedAt)}`));
+    }
+
+    if (charge.paidAt) {
+      details.appendChild(make('span', '', `Paga em ${formatChargeDate(charge.paidAt)}`));
+    }
+
+    if (!charge.respondedAt && !charge.paidAt) {
+      details.appendChild(make('span', '', 'Gerencie esta cobrança pelo WhatsApp.'));
+    }
+
+    card.append(top, valueLine, details);
+    container.appendChild(card);
+  });
+}
+
+async function renderCobrancas() {
+  if (!$('charges-received-list') || !$('charges-sent-list')) return;
+
+  const [receivedSnap, sentSnap] = await Promise.all([
+    get(ref(db, cobrancasRecebidasPath())),
+    get(ref(db, cobrancasEnviadasPath()))
+  ]);
+
+  const received = Object.entries(receivedSnap.val() || {});
+  const sent = Object.entries(sentSnap.val() || {});
+
+  updateChargeSummary(received, sent);
+  renderChargeList('charges-received-list', received, 'received');
+  renderChargeList('charges-sent-list', sent, 'sent');
+}
+
 // RESUMO
 async function updateSummary() {
   const [expenseSnap, budgetSnap, billSnap, metaSnap] = await Promise.all([
@@ -1365,6 +1536,7 @@ async function render() {
   await renderExpenses();
   await renderBills();
   await renderFixos();
+  await renderCobrancas();
   await updateSummary();
   await renderCompChart();
 }
@@ -2129,6 +2301,122 @@ select:focus {
   background: rgba(242,177,61,.14);
 }
 
+
+.charge-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.charge-list {
+  display: grid;
+  gap: 10px;
+}
+
+.charge-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  padding: 12px;
+}
+
+.charge-card:hover {
+  border-color: var(--line-2);
+}
+
+.charge-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.charge-info {
+  min-width: 0;
+}
+
+.charge-title {
+  color: var(--text);
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.charge-meta,
+.charge-details {
+  color: var(--muted);
+  font-size: .72rem;
+}
+
+.charge-details {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.charge-value-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: baseline;
+  margin-top: 10px;
+}
+
+.charge-value {
+  font-family: 'DM Mono', monospace;
+  font-size: 1rem;
+  color: var(--accent);
+}
+
+.charge-percent {
+  color: var(--muted);
+  font-size: .72rem;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 78px;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: .66rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.status-pendente {
+  color: #ffd180;
+  background: rgba(242,177,61,.14);
+  border: 1px solid rgba(242,177,61,.28);
+}
+
+.status-aceita {
+  color: #95bdff;
+  background: rgba(79,141,247,.14);
+  border: 1px solid rgba(79,141,247,.28);
+}
+
+.status-recusada {
+  color: #ff9da4;
+  background: rgba(240,91,99,.14);
+  border: 1px solid rgba(240,91,99,.28);
+}
+
+.status-cancelada {
+  color: #bac4d2;
+  background: rgba(146,160,179,.14);
+  border: 1px solid rgba(146,160,179,.22);
+}
+
+.status-paga {
+  color: #70ebc5;
+  background: rgba(18,185,129,.14);
+  border: 1px solid rgba(18,185,129,.3);
+}
+
+
 .limits-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2201,7 +2489,8 @@ select:focus {
 }
 
 @media (max-width: 980px) {
-  .summary-grid {
+  .summary-grid,
+  .charge-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -2268,7 +2557,8 @@ select:focus {
 }
 
 @media (max-width: 420px) {
-  .summary-grid {
+  .summary-grid,
+  .charge-summary-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2374,6 +2664,7 @@ select:focus {
       <button class="tab-btn active" data-tab="gastos" onclick="switchTab('gastos')">💸 Gastos</button>
       <button class="tab-btn" data-tab="analise" onclick="switchTab('analise')">📊 Análise</button>
       <button class="tab-btn" data-tab="contas" onclick="switchTab('contas')">🤝 Contas</button>
+      <button class="tab-btn" data-tab="cobrancas" onclick="switchTab('cobrancas')">💳 Cobranças</button>
       <button class="tab-btn" data-tab="fixos" onclick="switchTab('fixos')">🔁 Fixos</button>
       <button class="tab-btn" data-tab="metas" onclick="switchTab('metas')">🎯 Metas</button>
       <button class="tab-btn" data-tab="config" onclick="switchTab('config')">⚙️ Limites</button>
@@ -2518,7 +2809,56 @@ select:focus {
       </div>
     </section>
 
-    <section id="tab-fixos" class="tab-content">
+    
+    <section id="tab-cobrancas" class="tab-content">
+      <div class="charge-summary-grid">
+        <div class="summary-card">
+          <div class="card-label">Pendente a receber</div>
+          <div class="card-value text-accent" id="charge-receive-total">R$ 0,00</div>
+          <div class="card-sub">Cobranças enviadas pendentes</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="card-label">Pendente a pagar</div>
+          <div class="card-value text-warning" id="charge-pay-total">R$ 0,00</div>
+          <div class="card-sub">Cobranças recebidas pendentes</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="card-label">Recebido</div>
+          <div class="card-value text-info" id="charge-paid-total">R$ 0,00</div>
+          <div class="card-sub">Cobranças marcadas como pagas</div>
+        </div>
+
+        <div class="summary-card">
+          <div class="card-label">Pendências</div>
+          <div class="card-value" id="charge-pending-count">0</div>
+          <div class="card-sub">Itens pendentes</div>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="panel">
+          <div class="panel-title">
+            <span>Recebidas</span>
+            <span>Responder pelo WhatsApp</span>
+          </div>
+          <div class="field-hint">Para aceitar, recusar ou marcar como paga, responda pelo WhatsApp.</div>
+          <div id="charges-received-list" class="charge-list"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">
+            <span>Enviadas</span>
+            <span>Acompanhe o status</span>
+          </div>
+          <div class="field-hint">As cobranças enviadas pelo bot aparecem aqui com o status atualizado.</div>
+          <div id="charges-sent-list" class="charge-list"></div>
+        </div>
+      </div>
+    </section>
+
+<section id="tab-fixos" class="tab-content">
       <div class="two-col">
         <div class="panel">
           <div class="panel-title">
